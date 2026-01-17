@@ -97,7 +97,7 @@ class LeetCodeClient:
                 return snippet.get("code", "")
         return ""
 
-    def _parse_test_cases(self, sample_test_case: str, example_testcases: str) -> list[TestCase]:
+    def _parse_test_cases(self, sample_test_case: str, example_testcases: str) -> list[SampleTestCase]:
         # Use exampleTestcases if available, otherwise fall back to sampleTestCase
         test_input = example_testcases if example_testcases else sample_test_case
         if not test_input:
