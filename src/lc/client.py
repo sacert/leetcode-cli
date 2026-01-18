@@ -4,9 +4,10 @@ import time
 from typing import Any
 
 import httpx
+from markdownify import markdownify
 
 from lc.exceptions import ProblemNotFoundError, SessionExpiredError, SubmissionError
-from lc.models import Problem, SampleTestCase, SubmissionResult
+from lc.models import Problem, SampleTestCase, SubmissionResult, TestCaseResult, TestResult
 
 
 GRAPHQL_ENDPOINT = "https://leetcode.com/graphql/"
@@ -81,12 +82,15 @@ class LeetCodeClient:
             question.get("exampleTestcases", ""),
         )
 
+        html_content = question.get("content", "")
+        markdown_content = markdownify(html_content, heading_style="ATX", strip=["script", "style"])
+
         return Problem(
             id=int(question["questionId"]),
             slug=question["titleSlug"],
             title=question["title"],
             difficulty=question["difficulty"],
-            content=question.get("content", ""),
+            content=markdown_content,
             code_template=code_template,
             sample_test_cases=test_cases,
         )
@@ -143,7 +147,7 @@ class LeetCodeClient:
         code: str,
         test_cases: str,
         language: str = "python3",
-    ) -> SubmissionResult:
+    ) -> TestResult:
         """Run solution against sample test cases."""
         interpret_url = f"{BASE_URL}/problems/{slug}/interpret_solution/"
         payload = {
@@ -165,7 +169,92 @@ class LeetCodeClient:
         if not interpret_id:
             raise SubmissionError("No interpret ID returned")
 
-        return self._poll_submission_result(interpret_id)
+        return self._poll_test_result(interpret_id, test_cases)
+
+    def _poll_test_result(self, interpret_id: str, test_cases: str) -> TestResult:
+        """Poll for test result and parse with full details."""
+        check_url = f"{BASE_URL}/submissions/detail/{interpret_id}/check/"
+
+        for _ in range(MAX_POLL_ATTEMPTS):
+            response = self._client.get(check_url)
+            self._check_response_auth(response)
+            response.raise_for_status()
+
+            data = response.json()
+            state = data.get("state")
+
+            if state == "SUCCESS":
+                return self._parse_test_result(data, test_cases)
+
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+        raise SubmissionError("Test run timed out")
+
+    def _parse_test_result(self, data: dict[str, Any], test_cases: str) -> TestResult:
+        """Parse test result with detailed per-test-case information."""
+        status_msg = data.get("status_msg", "Unknown")
+        correct_answer = data.get("correct_answer", False)
+
+        # Check for compile/runtime errors
+        if status_msg in ("Compile Error", "Runtime Error", "Time Limit Exceeded"):
+            error_msg = data.get("full_compile_error") or data.get("full_runtime_error") or ""
+            return TestResult(
+                accepted=False,
+                status_msg=f"{status_msg}: {error_msg}" if error_msg else status_msg,
+                test_case_results=[],
+            )
+
+        # Get arrays of results - filter out empty trailing entries
+        code_answers = data.get("code_answer", [])
+        expected_answers = data.get("expected_code_answer", [])
+        std_outputs = data.get("std_output_list", [])
+        compare_results = data.get("compare_result", "")
+
+        # Determine actual number of test cases from expected answers (most reliable)
+        # Filter out empty strings that LeetCode sometimes appends
+        num_cases = len([e for e in expected_answers if e])
+
+        if num_cases == 0:
+            return TestResult(
+                accepted=False,
+                status_msg=status_msg,
+                test_case_results=[],
+            )
+
+        # Parse test case inputs - each test case may have multiple lines
+        input_lines = test_cases.strip().split("\n")
+
+        # Calculate lines per test case
+        lines_per_case = max(1, len(input_lines) // num_cases)
+
+        test_case_results: list[TestCaseResult] = []
+
+        for i in range(num_cases):
+            # Get input lines for this test case
+            start_line = i * lines_per_case
+            end_line = start_line + lines_per_case
+            test_input = "\n".join(input_lines[start_line:end_line])
+
+            expected = expected_answers[i] if i < len(expected_answers) else ""
+            actual = code_answers[i] if i < len(code_answers) else ""
+            stdout = std_outputs[i] if i < len(std_outputs) else ""
+            passed = compare_results[i] == "1" if i < len(compare_results) else False
+
+            test_case_results.append(
+                TestCaseResult(
+                    input=test_input,
+                    expected=expected,
+                    actual=actual,
+                    passed=passed,
+                    stdout=stdout,
+                )
+            )
+
+        return TestResult(
+            accepted=correct_answer,
+            status_msg=status_msg,
+            test_case_results=test_case_results,
+        )
 
     def _poll_submission_result(self, submission_id: int | str) -> SubmissionResult:
         check_url = f"{BASE_URL}/submissions/detail/{submission_id}/check/"
@@ -178,11 +267,11 @@ class LeetCodeClient:
             data = response.json()
             state = data.get("state")
 
-            if state == "PENDING":
-                time.sleep(POLL_INTERVAL_SECONDS)
-                continue
+            if state == "SUCCESS":
+                return self._parse_submission_result(data)
 
-            return self._parse_submission_result(data)
+            # Keep polling for PENDING, STARTED, or other intermediate states
+            time.sleep(POLL_INTERVAL_SECONDS)
 
         raise SubmissionError("Submission check timed out")
 

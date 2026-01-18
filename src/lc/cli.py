@@ -116,7 +116,9 @@ def submit(
 
 @app.command()
 def test(
-    slug: Optional[str] = typer.Argument(None, help="Problem slug (optional if in problem directory)")
+    slug: Optional[str] = typer.Argument(None, help="Problem slug (optional if in problem directory)"),
+    testcase: Optional[str] = typer.Option(None, "--testcase", "-t", help="Custom test case input"),
+    testcase_file: Optional[Path] = typer.Option(None, "--file", "-f", help="Read test case from file"),
 ) -> None:
     """Run solution against sample test cases."""
     storage = Storage()
@@ -128,29 +130,50 @@ def test(
         code = storage.get_solution_code(resolved_slug)
         client = session.get_client()
 
-        console.print(f"Running sample tests for '[bold]{problem.title}[/bold]'...")
+        # Use custom test case if provided, otherwise use sample test cases
+        if testcase_file:
+            test_input = testcase_file.read_text().strip()
+            console.print(f"Running custom test for '[bold]{problem.title}[/bold]'...")
+        elif testcase:
+            test_input = testcase
+            console.print(f"Running custom test for '[bold]{problem.title}[/bold]'...")
+        else:
+            if not problem.sample_test_cases:
+                console.print("[yellow]No sample test cases found.[/yellow]")
+                return
+            test_input = problem.sample_test_cases[0].input
+            console.print(f"Running sample tests for '[bold]{problem.title}[/bold]'...")
 
-        if not problem.sample_test_cases:
-            console.print("[yellow]No sample test cases found.[/yellow]")
-            return
-
-        test_input = problem.sample_test_cases[0].input
         result = client.run_tests(resolved_slug, problem.id, code, test_input)
 
+        # Handle errors with no test results
+        if not result.test_case_results:
+            console.print(f"\n[red bold]{result.status_msg}[/red bold]")
+            return
+
+        # Display each test case result
+        for i, tc in enumerate(result.test_case_results):
+            if tc.passed:
+                console.print(f"\n[green]Test {i + 1} passed[/green]")
+            else:
+                console.print(f"\n[red]Test {i + 1} failed[/red]")
+
+            # Format multi-line inputs nicely
+            input_display = tc.input.replace("\n", " | ")
+            console.print(f"  [dim]Input:[/dim]    {input_display}")
+            console.print(f"  [dim]Expected:[/dim] {tc.expected}")
+            console.print(f"  [dim]Actual:[/dim]   {tc.actual}")
+            if tc.stdout:
+                console.print(f"  [dim]Stdout:[/dim]   {tc.stdout}")
+
+        # Summary
+        passed = sum(1 for tc in result.test_case_results if tc.passed)
+        total = len(result.test_case_results)
+
         if result.accepted:
-            for i in range(result.total_test_cases):
-                console.print(f"[green]Test {i + 1} passed[/green]")
-            console.print("\n[green bold]All sample tests passed.[/green bold]")
+            console.print(f"\n[green bold]All tests passed ({passed}/{total})[/green bold]")
         else:
-            passed = result.test_cases_passed
-            total = result.total_test_cases
-            for i in range(passed):
-                console.print(f"[green]Test {i + 1} passed[/green]")
-            console.print(f"[red]Test {passed + 1} failed[/red]")
-            if result.failed_test_case:
-                console.print(f"  Input: {result.failed_test_case.input}")
-                console.print(f"  Expected: {result.failed_test_case.expected}")
-            console.print(f"\n[red]{passed}/{total} tests passed.[/red]")
+            console.print(f"\n[red bold]{passed}/{total} tests passed[/red bold]")
     except (SessionExpiredError, ProblemNotFoundError, CookieError) as e:
         _handle_error(e)
 

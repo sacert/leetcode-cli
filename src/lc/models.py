@@ -41,6 +41,26 @@ class SubmissionResult:
 
 
 @dataclass
+class TestCaseResult:
+    """Represents the result of a single test case."""
+
+    input: str
+    expected: str
+    actual: str
+    passed: bool
+    stdout: str = ""
+
+
+@dataclass
+class TestResult:
+    """Represents the result of running test cases."""
+
+    accepted: bool
+    status_msg: str
+    test_case_results: list[TestCaseResult]
+
+
+@dataclass
 class Config:
     """User configuration for the CLI."""
 
